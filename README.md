@@ -1,17 +1,5 @@
 # 📚 Telegram Book & Film Fetcher Bot
 
-A Telegram bot that fetches books or films from a private channel and sends them to users based on a code or request.  
-Built with **Python** and hosted on **Railway** for 24/7 uptime.
-
----
-
-## 🚀 Features
-- Fetch books or films from a **private Telegram channel**.
-- Works in **public or private channels**.
-- Uses **webhook mode** for fast and conflict-free updates.
-- Hosted on **Railway** for free 24/7 availability.
-- Written in **Python** with the `python-telegram-bot` library.
-
 ---
 
 ## 🛠 Requirements
