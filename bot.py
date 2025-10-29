@@ -29,11 +29,12 @@ app = FastAPI()
 
 @app.get("/")
 def health_check():
+    """Health check endpoint to keep Render alive"""
     return {"status": "ok"}
 
 @app.post("/webhook")
 async def webhook(req: Request):
-    """Receive updates from Telegram webhook"""
+    """Receive Telegram updates via webhook"""
     data = await req.json()
     update = Update.de_json(data, bot)
     await app.state.application.update_queue.put(update)
@@ -86,8 +87,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # ----------------- Start Bot -----------------
-async def main():
-    # Build the bot application
+async def start_bot():
     application = ApplicationBuilder().token(TOKEN).build()
     
     # Add handlers
@@ -95,23 +95,22 @@ async def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    # Save application instance to FastAPI app for webhook
+    # Save app instance to FastAPI for webhook
     app.state.application = application
 
     # Set webhook
-    await bot.delete_webhook()  # remove any previous webhook
+    await bot.delete_webhook()
     await bot.set_webhook(WEBHOOK_URL)
     logger.info(f"Webhook set to {WEBHOOK_URL}")
 
-    # Run the bot in background (handling updates via webhook)
+    # Initialize and start the application
     await application.initialize()
     await application.start()
-    await application.updater.start_polling()  # optional, just for safety
-    logger.info("Bot is running...")
-    
-    # Keep the bot running
-    await application.wait_until_stopped()
+    logger.info("Bot is running via webhook...")
 
-# ----------------- Run AsyncIO -----------------
+    # Keep the bot running forever
+    await asyncio.Event().wait()  # infinite loop to prevent stopping
+
+# ----------------- Run Everything -----------------
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(start_bot())
