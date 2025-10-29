@@ -1,9 +1,17 @@
 import os
 import logging
+import asyncio
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-import asyncio
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    filters,
+    ContextTypes,
+)
+import uvicorn
 
 # ----------------- Logging -----------------
 logging.basicConfig(
@@ -40,7 +48,7 @@ async def webhook(req: Request):
     await app.state.application.update_queue.put(update)
     return {"status": "ok"}
 
-# ----------------- Telegram Bot Handlers -----------------
+# ----------------- Telegram Handlers -----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📚 Get Started", callback_data="get_started")],
@@ -88,6 +96,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ----------------- Start Bot -----------------
 async def start_bot():
+    """Initialize bot, set webhook, and keep running"""
     application = ApplicationBuilder().token(TOKEN).build()
     
     # Add handlers
@@ -95,10 +104,10 @@ async def start_bot():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    # Save app instance to FastAPI for webhook
+    # Save app instance to FastAPI for webhook usage
     app.state.application = application
 
-    # Set webhook
+    # Set Telegram webhook
     await bot.delete_webhook()
     await bot.set_webhook(WEBHOOK_URL)
     logger.info(f"Webhook set to {WEBHOOK_URL}")
@@ -108,9 +117,20 @@ async def start_bot():
     await application.start()
     logger.info("Bot is running via webhook...")
 
-    # Keep the bot running forever
-    await asyncio.Event().wait()  # infinite loop to prevent stopping
+    # Keep bot alive forever
+    await asyncio.Event().wait()  # Infinite wait to prevent stopping
 
-# ----------------- Run Everything -----------------
+# ----------------- Run FastAPI + Bot -----------------
+async def main():
+    # Start bot in background
+    asyncio.create_task(start_bot())
+
+    # Start FastAPI server on Render's assigned port
+    port = int(os.environ.get("PORT", 8000))
+    logger.info(f"Starting FastAPI on port {port}")
+    config = uvicorn.Config(app=app, host="0.0.0.0", port=port, log_level="info")
+    server = uvicorn.Server(config)
+    await server.serve()
+
 if __name__ == "__main__":
-    asyncio.run(start_bot())
+    asyncio.run(main())
