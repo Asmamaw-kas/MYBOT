@@ -1,143 +1,152 @@
-import logging
+# main.py
 import os
-import threading
-import time
-import requests
-import uvicorn
-from fastapi import FastAPI
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import logging
+import asyncio
+from fastapi import FastAPI, Request, HTTPException
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.ext import (
-    Application,
+    ApplicationBuilder,
     CommandHandler,
-    CallbackQueryHandler,
     MessageHandler,
+    CallbackQueryHandler,
     filters,
     ContextTypes,
 )
 
-# ─────────────────────────────
-#  LOGGING
-# ─────────────────────────────
+import uvicorn
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+    level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────
-#  FASTAPI APP
-# ─────────────────────────────
-app = FastAPI()
-
-@app.get("/")
-def health_check():
-    return {"status": "ok", "message": "Bot is running!"}
-
-# ─────────────────────────────
-#  ENVIRONMENT VARIABLES
-# ─────────────────────────────
+# ---------- ENV ----------
 TOKEN = os.getenv("BOT_TOKEN")
 PRIVATE_CHANNEL_ID = os.getenv("PRIVATE_CHANNEL_ID")
 PUBLIC_CHANNEL = os.getenv("PUBLIC_CHANNEL")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://your-app.onrender.com/webhook
 
-# ─────────────────────────────
-#  TELEGRAM COMMAND HANDLERS
-# ─────────────────────────────
+if not all([TOKEN, PRIVATE_CHANNEL_ID, PUBLIC_CHANNEL, WEBHOOK_URL]):
+    missing = [k for k,v in {
+        "BOT_TOKEN": TOKEN,
+        "PRIVATE_CHANNEL_ID": PRIVATE_CHANNEL_ID,
+        "PUBLIC_CHANNEL": PUBLIC_CHANNEL,
+        "WEBHOOK_URL": WEBHOOK_URL
+    }.items() if not v]
+    raise RuntimeError(f"Missing env vars: {', '.join(missing)}")
+
+bot = Bot(TOKEN)
+app = FastAPI()
+
+# ---------- Handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
+    kb = [
         [InlineKeyboardButton("📚 Get Started", callback_data="get_started")],
         [InlineKeyboardButton("ℹ️ Help", callback_data="help")],
-        [InlineKeyboardButton("Join Channel", url=PUBLIC_CHANNEL)]
+        [InlineKeyboardButton("Join Channel", url=PUBLIC_CHANNEL)],
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "📚 Welcome to Book Bot!\n\n"
-        f"Join our channel:\n{PUBLIC_CHANNEL}\n\n"
-        "Send a book ID to download.\nExample: 123",
-        reply_markup=reply_markup
+        f"📚 Welcome!\nJoin: {PUBLIC_CHANNEL}\nSend book ID (e.g. 123)",
+        reply_markup=InlineKeyboardMarkup(kb),
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     if query.data == "get_started":
         await query.edit_message_text(
-            text=f"📖 How to download:\n\n1. Find book IDs in:\n{PUBLIC_CHANNEL}\n\n2. Send the ID like: <code>123</code>",
-            parse_mode="HTML"
+            f"📖 Send book ID (from {PUBLIC_CHANNEL}). Example: <code>123</code>",
+            parse_mode="HTML",
         )
-    elif query.data == "help":
-        await query.edit_message_text(
-            text=f"ℹ️ Help:\n• Send book ID to download\n• Find IDs in: {PUBLIC_CHANNEL}",
-            parse_mode="HTML"
-        )
+    else:
+        await query.edit_message_text("ℹ️ Help: send book ID.", parse_mode="HTML")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
+    text = (update.message.text or "").strip()
     if text.isdigit():
         try:
             await context.bot.forward_message(
                 chat_id=update.effective_chat.id,
                 from_chat_id=int(PRIVATE_CHANNEL_ID),
-                message_id=int(text)
+                message_id=int(text),
             )
             await update.message.reply_text("✅ Book sent!")
         except Exception as e:
-            logger.error(f"Error forwarding message: {e}")
+            logger.exception("Forward failed")
             await update.message.reply_text(f"❌ Error. Check ID at {PUBLIC_CHANNEL}")
     else:
         await update.message.reply_text(
-            f"📚 Send a valid book ID\nFind IDs at: {PUBLIC_CHANNEL}\nExample: <code>123</code>",
-            parse_mode="HTML"
+            f"📚 Send a numeric book ID. Find IDs at {PUBLIC_CHANNEL}",
+            parse_mode="HTML",
         )
 
-# ─────────────────────────────
-#  KEEP ALIVE SYSTEM
-# ─────────────────────────────
-def keep_alive():
-    """Ping the Render web service every 5 minutes to prevent sleeping."""
-    url = "https://your-app-name.onrender.com"  # 🔁 Replace with your Render URL
-    while True:
-        try:
-            requests.get(url)
-            logger.info("Pinged Render to keep alive.")
-        except Exception as e:
-            logger.warning(f"Keep-alive ping failed: {e}")
-        time.sleep(300)  # every 5 minutes
+# ---------- Webhook endpoint ----------
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
+    """Telegram will POST updates here (HTTPS required)."""
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    update = Update.de_json(payload, bot)
+    # application is stored in app.state (set on startup)
+    application = getattr(app.state, "telegram_app", None)
+    if not application:
+        # If bot isn't ready, return 503 so Telegram retries
+        raise HTTPException(status_code=503, detail="Bot not ready")
+    # Put the update into the bot's update queue for processing
+    await application.update_queue.put(update)
+    return {"ok": True}
 
-# ─────────────────────────────
-#  RUN FASTAPI
-# ─────────────────────────────
-def run_fastapi():
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+@app.get("/")
+async def health():
+    return {"status": "ok"}
 
-# ─────────────────────────────
-#  MAIN ENTRY POINT
-# ─────────────────────────────
-def main():
-    if not all([TOKEN, PRIVATE_CHANNEL_ID, PUBLIC_CHANNEL]):
-        missing = []
-        if not TOKEN: missing.append("BOT_TOKEN")
-        if not PRIVATE_CHANNEL_ID: missing.append("PRIVATE_CHANNEL_ID")
-        if not PUBLIC_CHANNEL: missing.append("PUBLIC_CHANNEL")
-        logger.error(f"Missing environment variables: {', '.join(missing)}")
-        raise ValueError(f"Missing: {', '.join(missing)}")
+# ---------- Start and shutdown lifecycle ----------
+@app.on_event("startup")
+async def on_startup():
+    logger.info("FastAPI startup: initializing Telegram application")
+    application = ApplicationBuilder().token(TOKEN).build()
 
-    # Start FastAPI in background
-    threading.Thread(target=run_fastapi, daemon=True).start()
-
-    # Start keep-alive ping thread
-    threading.Thread(target=keep_alive, daemon=True).start()
-
-    # Start Telegram bot
-    application = Application.builder().token(TOKEN).build()
+    # Register handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot started successfully!")
-    application.run_polling()
+    # Store application on fastapi app so webhook route can access it
+    app.state.telegram_app = application
+
+    # set webhook (replace existing)
+    await bot.delete_webhook(drop_pending_updates=True)
+    ok = await bot.set_webhook(WEBHOOK_URL)
+    if not ok:
+        logger.warning("set_webhook returned False")
+    else:
+        logger.info(f"Webhook set to {WEBHOOK_URL}")
+
+    # initialize and start the application (run handlers in background)
+    await application.initialize()
+    await application.start()
+    logger.info("Telegram application started (webhook mode)")
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    logger.info("Shutdown: stopping Telegram application and deleting webhook")
+    application = getattr(app.state, "telegram_app", None)
+    if application:
+        await application.stop()
+        await application.shutdown()
+    try:
+        await bot.delete_webhook(drop_pending_updates=False)
+    except Exception:
+        logger.exception("Failed to delete webhook during shutdown")
+
+# ---------- Run Uvicorn (entrypoint) ----------
+def run():
+    port = int(os.environ.get("PORT", 8000))
+    # uvicorn.run is blocking and will bind the port Render expects
+    uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
 
 if __name__ == "__main__":
-    main()
+    run()
