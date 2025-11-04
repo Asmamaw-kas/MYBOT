@@ -31,7 +31,11 @@ app = FastAPI()
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "Bot is running!"}
+    return {"status": "ok", "message": "Bot is running!", "timestamp": time.time()}
+
+@app.get("/ping")
+def ping():
+    return {"status": "pong", "timestamp": time.time()}
 
 # ─────────────────────────────
 #  ENVIRONMENT VARIABLES
@@ -39,6 +43,7 @@ def health_check():
 TOKEN = os.getenv("BOT_TOKEN")
 PRIVATE_CHANNEL_ID = os.getenv("PRIVATE_CHANNEL_ID")
 PUBLIC_CHANNEL = os.getenv("PUBLIC_CHANNEL")
+RENDER_URL = os.getenv("RENDER_URL", "https://mybot-uwgk.onrender.com")  # 🔁 Replace with your actual Render URL
 
 # ─────────────────────────────
 #  TELEGRAM COMMAND HANDLERS
@@ -92,25 +97,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # ─────────────────────────────
-#  KEEP ALIVE SYSTEM
+#  IMPROVED KEEP ALIVE SYSTEM
 # ─────────────────────────────
 def keep_alive():
-    """Ping the Render web service every 5 minutes to prevent sleeping."""
-    url = "https://your-app-name.onrender.com"  # 🔁 Replace with your Render URL
+    """Enhanced ping system to keep Render awake"""
+    urls_to_ping = [
+        RENDER_URL,
+        f"{RENDER_URL}/",
+        f"{RENDER_URL}/ping"
+    ]
+    
+    while True:
+        for url in urls_to_ping:
+            try:
+                response = requests.get(url, timeout=10)
+                logger.info(f"✅ Pinged {url} - Status: {response.status_code}")
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"❌ Ping failed for {url}: {e}")
+            time.sleep(10)  # Small delay between pings
+        
+        # Wait 4 minutes before next round of pings
+        # This keeps the service active without hitting rate limits
+        time.sleep(240)
+
+# ─────────────────────────────
+#  BOT HEALTH MONITOR
+# ─────────────────────────────
+def bot_health_monitor(application):
+    """Monitor bot health and restart if needed"""
     while True:
         try:
-            requests.get(url)
-            logger.info("Pinged Render to keep alive.")
+            # Check if bot is running by attempting a simple API call
+            bot_info = application.bot.get_me()
+            logger.info(f"🤖 Bot is healthy: {bot_info.username}")
         except Exception as e:
-            logger.warning(f"Keep-alive ping failed: {e}")
-        time.sleep(300)  # every 5 minutes
+            logger.error(f"❌ Bot health check failed: {e}")
+            # In a real scenario, you might want to restart the bot
+            # For now, we'll just log the error
+        time.sleep(300)  # Check every 5 minutes
 
 # ─────────────────────────────
 #  RUN FASTAPI
 # ─────────────────────────────
 def run_fastapi():
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
 
 # ─────────────────────────────
 #  MAIN ENTRY POINT
@@ -124,11 +155,19 @@ def main():
         logger.error(f"Missing environment variables: {', '.join(missing)}")
         raise ValueError(f"Missing: {', '.join(missing)}")
 
+    # Validate RENDER_URL is set
+    if RENDER_URL == "https://your-app-name.onrender.com":
+        logger.warning("⚠️  Please set RENDER_URL environment variable to your actual Render URL")
+
     # Start FastAPI in background
-    threading.Thread(target=run_fastapi, daemon=True).start()
+    fastapi_thread = threading.Thread(target=run_fastapi, daemon=True)
+    fastapi_thread.start()
+    logger.info("🚀 FastAPI server started")
 
     # Start keep-alive ping thread
-    threading.Thread(target=keep_alive, daemon=True).start()
+    keep_alive_thread = threading.Thread(target=keep_alive, daemon=True)
+    keep_alive_thread.start()
+    logger.info("🔔 Keep-alive system started")
 
     # Start Telegram bot
     application = Application.builder().token(TOKEN).build()
@@ -136,8 +175,24 @@ def main():
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot started successfully!")
-    application.run_polling()
+    # Start bot health monitor
+    health_thread = threading.Thread(target=bot_health_monitor, args=(application,), daemon=True)
+    health_thread.start()
+    logger.info("❤️  Health monitor started")
+
+    logger.info("🤖 Bot started successfully!")
+    
+    try:
+        application.run_polling(
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES
+        )
+    except Exception as e:
+        logger.error(f"❌ Bot crashed: {e}")
+        # Attempt to restart after a delay
+        time.sleep(60)
+        logger.info("🔄 Attempting to restart bot...")
+        main()
 
 if __name__ == "__main__":
     main()
